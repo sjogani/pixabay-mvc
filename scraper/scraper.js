@@ -27,46 +27,132 @@ if (!fs.existsSync(DEBUG_DIR)) {
 }
 
 // Parallel download limit
-const CONCURRENCY_LIMIT = 5;
+const CONCURRENCY_LIMIT = 20;
+
+const COOLDOWN_AFTER_PAGES = 10; // ✅ Cooldown every 10 pages
+const COOLDOWN_DURATION_MS = 30000; // ✅ 30 seconds cooldown
 
 // Scrape and download songs using Puppeteer
-async function scrapeSongs(limit = 5) {
+async function scrapeSongs(limit = 5, maxPages = 25) {
   const browser = await puppeteer.launch({ headless: false });
   const page = await browser.newPage();
 
   console.log(`🚀 Navigating to Pixabay Music Page...`);
-  await page.goto('https://pixabay.com/music/', { waitUntil: 'networkidle2' });
+  await page.goto('https://pixabay.com/music/search/?order=ec', { waitUntil: 'networkidle2' });
 
-  // Wait for song cards to load
-  await page.waitForSelector('div.audioRow--nAm4Z', { visible: true, timeout: 120000 });
+  let totalSongs = []; // ✅ Store all songs across pages
+  let currentPage = 1;
 
-  console.log(`🎵 Scraping metadata and extracting download URLs for ${limit} songs...`);
+  // ✅ Scrape multiple pages until limit or maxPages is reached
+  while (totalSongs.length < limit && currentPage <= maxPages) {
+    console.log(`🔎 Scraping page ${currentPage}...`);
 
-  // Get song metadata and detail page URLs from the main page
-  const songs = await getSongMetadata(page, limit);
+    // ✅ Scroll down to load all records on the current page
+    await autoScroll(page);
 
-  if (songs.length === 0) {
-    console.error('❌ No songs found! Check if the URL is correct.');
+    // ✅ Wait for song cards to load
+    await page.waitForSelector('div.audioRow--nAm4Z', { visible: true, timeout: 120000 });
+
+    // ✅ Get metadata from the current page
+    const songs = await getSongMetadata(page, limit - totalSongs.length);
+    totalSongs = totalSongs.concat(songs);
+
+    // ✅ Check cooldown condition
+    if (currentPage % COOLDOWN_AFTER_PAGES === 0) {
+      console.log(`⏸️ Cooldown for ${COOLDOWN_DURATION_MS / 1000} seconds to avoid rate limits...`);
+      await new Promise((resolve) => setTimeout(resolve, COOLDOWN_DURATION_MS));
+
+    }
+
+    // ✅ Check if limit is reached after current page
+    if (totalSongs.length >= limit) {
+      break; // 🎉 Limit reached, exit pagination
+    }
+
+    // ✅ Check and navigate to the next page if available
+    const hasNextPage = await goToNextPage(page);
+    if (!hasNextPage) {
+      console.log(`🚫 No more pages available. Stopping at page ${currentPage}.`);
+      break;
+    }
+
+    currentPage++;
+  }
+
+  if (totalSongs.length === 0) {
+    console.error('❌ No songs found! Check if the URL is correct or pagination is blocked.');
     await browser.close();
     return;
   }
 
-  console.log(`✅ Found ${songs.length} songs. Extracting audio URLs...`);
+  //console.log(`✅ Found ${totalSongs.length} songs. Extracting audio URLs...`);
 
-  // Extract download URLs by visiting individual song pages
-  await extractAudioUrls(browser, songs);
+  // ✅ Extract download URLs by visiting individual song pages
+  await extractAudioUrls(browser, totalSongs);
 
-  // Process songs with parallel downloads
-  await processSongsInParallel(songs);
+  // ✅ Process songs with parallel downloads
+  await processSongsInParallel(totalSongs);
 
-  console.log(`🎉 Downloaded ${songs.length} songs successfully!`);
+  console.log(`🎉 Downloaded ${totalSongs.length} songs successfully!`);
   await browser.close();
 }
+
+/*async function goToNextPage(page) {
+  const nextPageSelector = 'a[rel="next"]'; // Button to go to the next page
+  const nextPageExists = await page.$(nextPageSelector);
+
+  if (nextPageExists) {
+    console.log('➡️ Moving to the next page...');
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+      page.click(nextPageSelector),
+    ]);
+    return true; // ✅ Successfully navigated to the next page
+  } else {
+    console.warn('⚠️ No next page found.');
+    return false; // 🚫 No more pages
+  }
+}*/
+
+
+async function goToNextPage(page) {
+  try {
+    // ✅ Check if the next button exists and is visible
+    const nextButton = await page.$('a[rel="next"]');
+    if (!nextButton) {
+      console.log('🚫 No next page button found. Stopping...');
+      return false;
+    }
+
+    // ✅ Check if button is disabled
+    const isDisabled = await page.evaluate(
+      (button) => button.hasAttribute('disabled'),
+      nextButton
+    );
+    if (isDisabled) {
+      console.log('🚫 Next page button is disabled. Stopping...');
+      return false;
+    }
+
+    console.log('➡️ Going to the next page...');
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+      nextButton.click(), // ✅ Click next button
+    ]);
+
+    return true;
+  } catch (error) {
+    console.error(`❌ Error navigating to the next page: ${error.message}`);
+    return false;
+  }
+}
+
+
 
 // Extract metadata and song URLs from the main page
 async function getSongMetadata(page, limit) {
   const songElements = await page.$$('div.audioRow--nAm4Z');
-  console.log(`🔎 Found ${songElements.length} song cards. Scraping data...`);
+  //console.log(`🔎 Found ${songElements.length} song cards. Scraping data...`);
 
   const songs = [];
   for (let i = 0; i < Math.min(songElements.length, limit); i++) {
@@ -92,10 +178,16 @@ async function getSongMetadata(page, limit) {
       return linkElement ? linkElement.href : null;
     });
 
-    console.log({ title, author, duration, detailUrl });
-    console.log(`🎼 Song Found: ${title} by ${author}, Duration: ${duration}`);
+    // ✅ Extract cover image URL
+    const coverImageUrl = await element.evaluate((el) => {
+      const imgElement = el.querySelector('img');
+      return imgElement ? imgElement.src : null;
+    });
+
+    //console.log({ title, author, duration, detailUrl, coverImageUrl });
+    //console.log(`🎼 Song Found: ${title} by ${author}, Duration: ${duration}`);
     if (detailUrl) {
-      songs.push({ title, author, duration, detailUrl, audioUrl: null });
+      songs.push({ title, author, duration, detailUrl, coverImageUrl, audioUrl: null, coverfilename: null });
     } else {
       console.warn(`⚠️ No URL found for: ${title}`);
     }
@@ -109,18 +201,18 @@ async function extractAudioUrls(browser, songs) {
   const page = await browser.newPage();
 
   for (const song of songs) {
-    console.log(`🔍 Extracting download URL for: ${song.title}`);
+    //console.log(`🔍 Extracting download URL for: ${song.title}`);
     await page.goto(song.detailUrl, { waitUntil: 'networkidle2' });
 
     // Screenshot for debugging
-    const screenshotPath = path.join(DEBUG_DIR, `${song.title.replace(/[^a-zA-Z0-9]/g, '_')}.png`);
+    /*const screenshotPath = path.join(DEBUG_DIR, `${song.title.replace(/[^a-zA-Z0-9]/g, '_')}.png`);
     await page.screenshot({ path: screenshotPath });
-    console.log(`📸 Screenshot captured: ${screenshotPath}`);
+    console.log(`📸 Screenshot captured: ${screenshotPath}`);*/
 
     // Try capturing MP3 URL via interception
     const audioUrl = await captureMp3Url(page);
     if (audioUrl) {
-      console.log(`🎧 Found audio URL for ${song.title}: ${audioUrl}`);
+      //console.log(`🎧 Found audio URL for ${song.title}: ${audioUrl}`);
       song.audioUrl = audioUrl;
       continue;
     }
@@ -147,10 +239,12 @@ async function captureMp3Url(page) {
   return new Promise(async (resolve) => {
     let audioUrl = null;
 
+    page.setDefaultTimeout(180000);
+
     page.on('response', async (response) => {
       const requestUrl = response.url();
       if (requestUrl.endsWith('.mp3')) {
-        console.log(`✅ MP3 URL Intercepted: ${requestUrl}`);
+        //console.log(`✅ MP3 URL Intercepted: ${requestUrl}`);
         audioUrl = requestUrl;
         resolve(audioUrl);
       }
@@ -162,7 +256,7 @@ async function captureMp3Url(page) {
     );
 
     if (playButton) {
-      console.log('▶️ Clicking play button to trigger audio...');
+      //console.log('▶️ Clicking play button to trigger audio...');
       await playButton.click();
       await new Promise((resolve) => setTimeout(resolve, 7000)); // Wait to capture MP3 URL
     } else {
@@ -189,7 +283,7 @@ async function processSongsInParallel(songs) {
           // ✅ Skip if song already exists in the database
           const songExists = await checkIfSongExists(song.title, song.author);
           if (songExists) {
-            console.log(`⚠️ Skipping ${song.title}: Already in the database.`);
+            //console.log(`⚠️ Skipping ${song.title}: Already in the database.`);
             return;
           }
 
@@ -197,8 +291,14 @@ async function processSongsInParallel(songs) {
           const filename = `${song.title.replace(/[^a-zA-Z0-9]/g, '_')}.mp3`;
           const filePath = path.join(DOWNLOAD_DIR, filename);
           if (fs.existsSync(filePath)) {
-            console.log(`⚠️ Skipping download: ${filename} already exists.`);
+            //console.log(`⚠️ Skipping download: ${filename} already exists.`);
             return;
+          }
+
+          let coverfilename = null;
+
+          if (song.coverImageUrl) {
+            song.coverfilename = `${song.title.replace(/[^a-zA-Z0-9]/g, "_")}.jpg`;
           }
 
           // ✅ Insert metadata into MySQL
@@ -207,11 +307,14 @@ async function processSongsInParallel(songs) {
             filename,
             audioOwnerName: song.author || 'Unknown Author',
             duration: song.duration,
+            audioUrl: song.audioUrl, // ✅ Correctly passing audio URL
+            coverImageUrl: song.coverImageUrl || null,
+            coverfilename: song.coverfilename || null,
           });
           console.log(`✅ Inserted metadata for: ${song.title}, ID: ${songId}`);
 
           // ✅ Download MP3 after successful insertion
-          await downloadSong(song.audioUrl, filename);
+          //await downloadSong(song.audioUrl, filename);
 
           // ✅ Insert genre, mood, and theme if needed
           const genericId = await insertGenericMaster('Chill');
@@ -227,8 +330,34 @@ async function processSongsInParallel(songs) {
         }
       })
     );
+    await new Promise((resolve) =>
+      setTimeout(resolve, 5000 + Math.random() * 3000) );
   }
 }
+
+async function autoScroll(page) {
+  try {
+    await page.evaluate(async () => {
+      await new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = 100;
+        const timer = setInterval(() => {
+          const scrollHeight = document.body.scrollHeight;
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+
+          if (totalHeight >= scrollHeight - window.innerHeight) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 100);
+      });
+    });
+  } catch (error) {
+    console.warn(`⚠️ Scroll interrupted or navigation occurred: ${error.message}`);
+  }
+}
+
 
 // Download song and save it in D:\pixabay_downloads
 async function downloadSong(url, filename) {

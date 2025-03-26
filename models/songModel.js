@@ -3,10 +3,12 @@ const pool = require('../config/db');
 // Insert song into song_masters
 async function insertSongMaster(song) {
   const query = `
-    INSERT INTO song_masters (title, audiofilename, audioOwnerName, audioduration)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO song_masters (title, audiofilename, audioOwnerName, audioduration, audioUrl, coverImageUrl, coverfilename)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `;
-  const values = [song.title, song.filename, song.audioOwnerName, song.duration];
+  const values = [song.title, song.filename, song.audioOwnerName, song.duration, song.audioUrl,
+    song.coverImageUrl,
+    song.coverfilename || null];
   const [result] = await pool.query(query, values);
   return result.insertId;
 }
