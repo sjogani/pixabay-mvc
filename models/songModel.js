@@ -77,6 +77,32 @@ async function linkSongTheme(songId, themeId) {
   await pool.query(query, [songId, themeId]);
 }
 
+async function checkIfExists(tableName, name) {
+    
+    // Check if entry already exists
+    const query = `SELECT id FROM ${tableName} WHERE name = ? LIMIT 1`;
+    const [rows] = await pool.query(query, [name]);
+    
+    if (rows.length) {
+      //console.log(`✅ ${name} already exists in ${tableName}, ID: ${rows[0].id}`);
+      return rows[0].id;
+    }
+    
+    // If not found, insert new entry
+    const insertQuery = `
+    INSERT INTO ${tableName} (name)
+    VALUES (?)
+    ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
+  `;
+
+  const [result] = await pool.query(insertQuery, [name]);
+    //console.log('maybe'+result.insertId);
+    //console.log(`✅ Inserted ${name} into ${tableName}, ID: ${result.insertId}`);
+    return result.insertId;
+  }
+  
+  
+
 module.exports = {
   insertSongMaster,
   insertGenericMaster,
@@ -86,4 +112,5 @@ module.exports = {
   linkSongMood,
   linkSongTheme,
   checkIfSongExists,
+  checkIfExists,
 };

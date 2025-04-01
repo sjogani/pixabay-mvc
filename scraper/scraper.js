@@ -11,12 +11,16 @@ const {
   linkSongGeneric,
   linkSongMood,
   linkSongTheme,
+  checkIfExists,
   checkIfSongExists, // ✅ New function to check if song exists
 } = require('../models/songModel');
 
 // Download and debug directories
 const DOWNLOAD_DIR = path.join('D:\\pixabay_downloads');
+const OUTPUT_JSON = './songs_metadata.json'; // Final JSON file
 const DEBUG_DIR = path.join('D:\\pixabay_debug');
+
+const { exec } = require('child_process');
 
 // Create directories if they don’t exist
 if (!fs.existsSync(DOWNLOAD_DIR)) {
@@ -27,20 +31,23 @@ if (!fs.existsSync(DEBUG_DIR)) {
 }
 
 // Parallel download limit
-const CONCURRENCY_LIMIT = 20;
+const CONCURRENCY_LIMIT = 10;
 
 const COOLDOWN_AFTER_PAGES = 10; // ✅ Cooldown every 10 pages
 const COOLDOWN_DURATION_MS = 30000; // ✅ 30 seconds cooldown
 
+
 // Scrape and download songs using Puppeteer
-async function scrapeSongs(limit = 5, maxPages = 25) {
+async function scrapeSongs(limit = 5, maxPages = 50) {
   const browser = await puppeteer.launch({ headless: false });
   const page = await browser.newPage();
 
   console.log(`🚀 Navigating to Pixabay Music Page...`);
   await page.goto('https://pixabay.com/music/search/?order=ec', { waitUntil: 'networkidle2' });
 
+
   let totalSongs = []; // ✅ Store all songs across pages
+  let prevPageSongs = [];
   let currentPage = 1;
 
   // ✅ Scrape multiple pages until limit or maxPages is reached
@@ -54,8 +61,21 @@ async function scrapeSongs(limit = 5, maxPages = 25) {
     await page.waitForSelector('div.audioRow--nAm4Z', { visible: true, timeout: 120000 });
 
     // ✅ Get metadata from the current page
-    const songs = await getSongMetadata(page, limit - totalSongs.length);
-    totalSongs = totalSongs.concat(songs);
+    try {
+      const currentSongs = await getSongMetadata(page, limit - totalSongs.length);
+      
+      const songsToProcess = [...prevPageSongs, ...currentSongs];
+      // ✅ Extract download URLs by visiting individual song pages
+      await extractAudioUrls(browser, songsToProcess);
+
+      // ✅ Process songs with parallel downloads
+      await processSongsInParallel(songsToProcess);
+
+      totalSongs = totalSongs.concat(currentSongs);
+      prevPageSongs = [...currentSongs];
+    } catch (error) {
+      console.error(`❌ Error while processing songs on page ${currentPage}: ${error.message}`);
+    }
 
     // ✅ Check cooldown condition
     if (currentPage % COOLDOWN_AFTER_PAGES === 0) {
@@ -68,6 +88,12 @@ async function scrapeSongs(limit = 5, maxPages = 25) {
     if (totalSongs.length >= limit) {
       break; // 🎉 Limit reached, exit pagination
     }
+
+     // ✅ Extract download URLs by visiting individual song pages
+    //await extractAudioUrls(browser, totalSongs);
+
+    
+
 
     // ✅ Check and navigate to the next page if available
     const hasNextPage = await goToNextPage(page);
@@ -87,33 +113,10 @@ async function scrapeSongs(limit = 5, maxPages = 25) {
 
   //console.log(`✅ Found ${totalSongs.length} songs. Extracting audio URLs...`);
 
-  // ✅ Extract download URLs by visiting individual song pages
-  await extractAudioUrls(browser, totalSongs);
-
-  // ✅ Process songs with parallel downloads
-  await processSongsInParallel(totalSongs);
-
+ 
   console.log(`🎉 Downloaded ${totalSongs.length} songs successfully!`);
   await browser.close();
 }
-
-/*async function goToNextPage(page) {
-  const nextPageSelector = 'a[rel="next"]'; // Button to go to the next page
-  const nextPageExists = await page.$(nextPageSelector);
-
-  if (nextPageExists) {
-    console.log('➡️ Moving to the next page...');
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-      page.click(nextPageSelector),
-    ]);
-    return true; // ✅ Successfully navigated to the next page
-  } else {
-    console.warn('⚠️ No next page found.');
-    return false; // 🚫 No more pages
-  }
-}*/
-
 
 async function goToNextPage(page) {
   try {
@@ -134,9 +137,9 @@ async function goToNextPage(page) {
       return false;
     }
 
-    console.log('➡️ Going to the next page...');
+    //console.log('➡️ Going to the next page...');
     await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 120000 }),
       nextButton.click(), // ✅ Click next button
     ]);
 
@@ -146,7 +149,6 @@ async function goToNextPage(page) {
     return false;
   }
 }
-
 
 
 // Extract metadata and song URLs from the main page
@@ -184,6 +186,11 @@ async function getSongMetadata(page, limit) {
       return imgElement ? imgElement.src : null;
     });
 
+    /*const genre = await element.evaluate((el) => {
+      const genreElement = el.querySelector('a[href*="/music/search/genre/"]');
+      return genreElement ? genreElement.innerText.trim() : 'Unknown';
+    });*/
+
     //console.log({ title, author, duration, detailUrl, coverImageUrl });
     //console.log(`🎼 Song Found: ${title} by ${author}, Duration: ${duration}`);
     if (detailUrl) {
@@ -197,42 +204,77 @@ async function getSongMetadata(page, limit) {
 }
 
 // Visit individual song pages to extract download URL
-async function extractAudioUrls(browser, songs) {
-  const page = await browser.newPage();
+  async function extractAudioUrls(browser, songs) {
+    const page = await browser.newPage();
 
-  for (const song of songs) {
-    //console.log(`🔍 Extracting download URL for: ${song.title}`);
-    await page.goto(song.detailUrl, { waitUntil: 'networkidle2' });
+    for (const song of songs) {
+      try {
+      //console.log(`🔍 Extracting download URL for: ${song.title}`);
+      
+      // ✅ Try navigating to song detail URL
+      await page.goto(song.detailUrl, { waitUntil: 'networkidle2', timeout: 180000 });
+    } catch (error) {
+      if (error.name === 'TimeoutError') {
+        console.warn(`⚠️ Timeout while loading: ${song.detailUrl}. Skipping this song...`);
+        continue; // Skip this song if navigation fails
+      } else {
+        console.error(`❌ Error navigating to song URL: ${error.message}`);
+        continue; // Skip and proceed with next song
+      }
+    }
+      // ✅ Extract multiple genres
+      song.genres = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('a[href*="/genre/"] span.label--Ngqjq'))
+          .map((el) => el.innerText.trim())
+          .filter((name) => name);
+      });
 
-    // Screenshot for debugging
-    /*const screenshotPath = path.join(DEBUG_DIR, `${song.title.replace(/[^a-zA-Z0-9]/g, '_')}.png`);
-    await page.screenshot({ path: screenshotPath });
-    console.log(`📸 Screenshot captured: ${screenshotPath}`);*/
+      //console.log(song.genres);
 
-    // Try capturing MP3 URL via interception
-    const audioUrl = await captureMp3Url(page);
-    if (audioUrl) {
-      //console.log(`🎧 Found audio URL for ${song.title}: ${audioUrl}`);
-      song.audioUrl = audioUrl;
-      continue;
+      // ✅ Extract multiple moods
+      song.moods = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('a[href*="/mood/"] span.label--Ngqjq'))
+          .map((el) => el.innerText.trim())
+          .filter((name) => name);
+      });
+
+      //console.log(song.moods);
+
+      // ✅ Extract multiple themes
+      song.themes = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('a[href*="/theme/"] span.label--Ngqjq'))
+          .map((el) => el.innerText.trim())
+          .filter((name) => name);
+      });
+
+      //console.log(song.themes);
+      //console.log('next');
+      // Try capturing MP3 URL via interception
+      const audioUrl = await captureMp3Url(page);
+      if (audioUrl) {
+        //console.log(`🎧 Found audio URL for ${song.title}: ${audioUrl}`);
+        song.audioUrl = audioUrl;
+        continue;
+      }
+      
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      // Fallback to <audio> element extraction
+      const fallbackAudioUrl = await page.evaluate(() => {
+        const audioElement = document.querySelector('audio > source, audio');
+        return audioElement ? audioElement.src : null;
+      });
+
+      if (fallbackAudioUrl) {
+        console.log(`🎧 Fallback URL found for ${song.title}: ${fallbackAudioUrl}`);
+        song.audioUrl = fallbackAudioUrl;
+      } else {
+        console.warn(`⚠️ No audio URL found for: ${song.title}`);
+      }
     }
 
-    // Fallback to <audio> element extraction
-    const fallbackAudioUrl = await page.evaluate(() => {
-      const audioElement = document.querySelector('audio > source, audio');
-      return audioElement ? audioElement.src : null;
-    });
-
-    if (fallbackAudioUrl) {
-      console.log(`🎧 Fallback URL found for ${song.title}: ${fallbackAudioUrl}`);
-      song.audioUrl = fallbackAudioUrl;
-    } else {
-      console.warn(`⚠️ No audio URL found for: ${song.title}`);
-    }
+    await page.close();
   }
-
-  await page.close();
-}
 
 // Capture MP3 URL function
 async function captureMp3Url(page) {
@@ -251,30 +293,44 @@ async function captureMp3Url(page) {
     });
 
     // Click play to trigger audio requests
+    // ✅ Wait for play button to appear
+    await page.waitForSelector(
+      'button[aria-label="paused"], button.playIcon--3-Qup, .container--vGyBg',
+      { visible: true }
+    );
+
+    try{
+    // ✅ Query again before clicking to avoid detachment
     const playButton = await page.$(
       'button[aria-label="paused"], button.playIcon--3-Qup, .container--vGyBg'
     );
 
     if (playButton) {
-      //console.log('▶️ Clicking play button to trigger audio...');
+      // ✅ Click button safely
       await playButton.click();
-      await new Promise((resolve) => setTimeout(resolve, 7000)); // Wait to capture MP3 URL
-    } else {
+
+      // ⏳ Wait for 7 seconds to allow audio to load
+      await new Promise((resolve) => setTimeout(resolve, 12000));
+    } 
+  }catch {
+    if (error.name === 'TimeoutError'){
       console.warn('⚠️ Play button not found.');
-      resolve(null);
     }
+    }
+
 
     setTimeout(() => {
       if (!audioUrl) {
         console.warn('⚠️ No audio URL captured. Resolving with null.');
         resolve(null);
       }
-    }, 10000);
+    }, 20000);
   });
 }
 
 // ✅ Check if song exists and process in parallel
 async function processSongsInParallel(songs) {
+  let allSongsData = [];
   for (let i = 0; i < songs.length; i += CONCURRENCY_LIMIT) {
     const batch = songs.slice(i, i + CONCURRENCY_LIMIT);
     await Promise.all(
@@ -302,7 +358,7 @@ async function processSongsInParallel(songs) {
           }
 
           // ✅ Insert metadata into MySQL
-          const songId = await insertSongMaster({
+          /*const songId = await insertSongMaster({
             title: song.title,
             filename,
             audioOwnerName: song.author || 'Unknown Author',
@@ -310,26 +366,46 @@ async function processSongsInParallel(songs) {
             audioUrl: song.audioUrl, // ✅ Correctly passing audio URL
             coverImageUrl: song.coverImageUrl || null,
             coverfilename: song.coverfilename || null,
-          });
-          console.log(`✅ Inserted metadata for: ${song.title}, ID: ${songId}`);
+          });*/
+
+          const songMetadata = {
+            title: song.title,
+            filename,
+            audioOwnerName: song.author || 'Unknown Author',
+            duration: song.duration,
+            audioUrl: song.audioUrl, // ✅ Correctly passing audio URL
+            coverImageUrl: song.coverImageUrl || null,
+            coverfilename: song.coverfilename || null,
+            genres: song.genres.filter((genre) => genre && genre !== 'Unknown'),
+            moods: song.moods.filter((mood) => mood && mood !== 'Unknown'),
+            themes: song.themes.filter((theme) => theme && theme !== 'Unknown'),
+          };
+
+          // ✅ Add metadata to allSongsData
+          allSongsData.push(songMetadata);
+          
 
           // ✅ Download MP3 after successful insertion
           //await downloadSong(song.audioUrl, filename);
 
-          // ✅ Insert genre, mood, and theme if needed
-          const genericId = await insertGenericMaster('Chill');
-          const moodId = await insertMoodMaster('Relaxing');
-          const themeId = await insertThemeMaster('Nature');
-
-          // ✅ Link song to generics, moods, and themes
-          await linkSongGeneric(songId, genericId);
-          await linkSongMood(songId, moodId);
-          await linkSongTheme(songId, themeId);
+          //console.log(`✅ Inserted metadata for: ${song.title}`);
         } catch (error) {
           console.error(`❌ Error processing song: ${song.title}`, error.message);
         }
+        
       })
     );
+
+    fs.writeFileSync(OUTPUT_JSON, JSON.stringify(allSongsData, null, 2));
+
+    exec('node scraper/metadataScraper.js', (error, stdout, stderr) => {
+      if (error) {
+        console.error(`❌ Error running metadataScraper.js: ${error.message}`);
+        return;
+      }
+      console.log(stdout);
+    });
+
     await new Promise((resolve) =>
       setTimeout(resolve, 5000 + Math.random() * 3000) );
   }
